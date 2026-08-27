@@ -79,7 +79,26 @@ detector already carried this knowledge (`^(node|codex|\d+\.\d+\.\d+)$`);
 upstream had not met it yet. After the fix: three Claude panes visible, with
 real `idle`/`waiting` status instead of `other`.
 
-**10. Dry-run no longer has side effects.** It was writing a real plist into
+**10. Labels were the agent's own stale self-description.** `session_label`
+returned the tmux pane title, which each agent writes for itself — Claude Code
+derives it from a session's *first* message, so the orchestrator pane still read
+"Clone Comp AI repositories" days later. Daniel opened a pane by its label and
+got a different agent, twice, and one of his messages went to the wrong session
+because of it. Labels now prefer **ai-composer's session title** — the name a
+person chose and keeps current — cached 30s, read-only, and **fail-soft**: if
+ai-composer is missing, slow or errors, it returns the previous answer or falls
+back to exactly the old behaviour. tmuxor must not require ai-composer to be
+healthy.
+
+**11. The list reordered itself under the reader.** Both the API path and the
+text renderer sorted by `(status, window_index, pane_index)`. Status flips every
+few seconds as agents work and idle, and **tmux reuses window indices when a
+window closes** — so closing one session moved an unrelated one up the list.
+An entry's position changed for reasons having nothing to do with its own agent,
+and anyone selecting by position got whoever was in that slot. Both paths now
+sort by `pane_id`, which never changes.
+
+**12. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 

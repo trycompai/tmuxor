@@ -121,6 +121,14 @@ def list_panes(claude_only: bool = False):
         if claude_only and not p["is_claude"]:
             continue
         panes.append(p)
+    # Return in a STABLE order. tmux lists by window index, and it reuses those
+    # indices when a window closes -- so closing one session silently moved an
+    # unrelated one up the list, and anyone selecting by position got a
+    # different agent than the one they meant. pane_id never changes.
+    def _num(p):
+        raw = str(p.get("pane_id", "")).lstrip("%")
+        return int(raw) if raw.isdigit() else 1 << 30
+    panes.sort(key=_num)
     return panes
 
 
@@ -510,8 +518,44 @@ def session_status(p):
     return "idle"
 
 
+# A pane title is written by the agent itself and drifts: Claude Code derives it
+# from a session's FIRST message, so the orchestrator pane read "Clone Comp AI
+# repositories" days after it stopped doing that. Daniel opened a pane by its
+# label and got a different agent. Where ai-composer knows a session's real name,
+# prefer it -- that is the name a person chose and keeps current.
+#
+# Read-only, cached, and fail-soft: if ai-composer is missing, slow or errors,
+# this returns {} and labelling falls back to exactly the old behaviour. tmuxor
+# must not depend on ai-composer being healthy.
+_TITLE_CACHE = {"at": 0.0, "map": {}}
+_TITLE_TTL = 30.0
+
+
+def _composer_titles():
+    now = time.monotonic()
+    if now - _TITLE_CACHE["at"] < _TITLE_TTL:
+        return _TITLE_CACHE["map"]
+    titles = {}
+    try:
+        out = subprocess.run(["ai-composer", "inspect", "sessions", "--json"],
+                             capture_output=True, text=True, timeout=5)
+        data = json.loads(out.stdout)
+        items = data if isinstance(data, list) else data.get("sessions", [])
+        for it in items:
+            pane = (it.get("binding") or {}).get("pane_id")
+            if it.get("lifecycle") == "running" and pane and it.get("title"):
+                titles[pane] = it["title"]
+    except Exception:
+        titles = _TITLE_CACHE["map"]      # keep the last good answer rather than blanking
+    _TITLE_CACHE["at"], _TITLE_CACHE["map"] = now, titles
+    return titles
+
+
 def session_label(p):
-    """Session task text with the leading status glyph stripped."""
+    """The name a person would recognise, preferring ai-composer's session title."""
+    named = _composer_titles().get(p["pane_id"])
+    if named:
+        return named
     t = (p["title"] or "").strip()
     if t and (t[0] == _STAR or _BR_LO <= ord(t[0]) <= _BR_HI):
         t = t[1:].strip()
@@ -532,8 +576,15 @@ def render_fleet_flat(rows=12, page=0, claude_only=True, width=30):
     """VIEW 1 — flat list, one row per session, window-tagged, working-first,
     paged. Returns ready-to-display monospace text."""
     panes = [p for p in list_panes() if (p["is_claude"] or not claude_only)]
-    order = {"working": 0, "idle": 1, "other": 2}
-    panes.sort(key=lambda p: (order[session_status(p)], p["window_index"], p["pane_index"]))
+    # Sort by pane id, which never changes. The previous key was
+    # (status, window_index, pane_index): status flips every few seconds as
+    # agents work and idle, and tmux REUSES window indices when a window closes,
+    # so an entry moved for reasons having nothing to do with its own agent.
+    # Anyone selecting by position got whoever happened to be in that slot.
+    def _pane_num(p):
+        raw = str(p.get("pane_id", "")).lstrip("%")
+        return int(raw) if raw.isdigit() else 1 << 30
+    panes.sort(key=_pane_num)
     total = len(panes)
     pages = max(1, (total + rows - 1) // rows)
     page = max(0, min(page, pages - 1))
