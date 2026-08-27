@@ -125,7 +125,9 @@ agent could not tell: `/api/transcribe` and `/api/panes/N/send` are separate
 calls and the text is identical either way.
 
 The server now remembers what Whisper returned and, when that exact text is sent
-to a pane, prefixes it with a marker naming it a transcription. Typed input is
+to a pane, prefixes it with a short marker: `(transcribed)`. A longer, more explanatory
+wording was tried first and read as clutter in front of every utterance —
+"transcribed" already tells a reader that an odd word may be a mishearing. Typed input is
 untouched — a marker on everything is noise, and this is only worth saying when
 it is true. Ten-minute window, last 24 transcriptions, so a stale match cannot
 mislabel something typed much later.

@@ -159,7 +159,10 @@ WHISPER_USD_PER_MIN = 0.006  # OpenAI whisper-1 pricing
 _RECENT_TRANSCRIPTS = deque(maxlen=24)      # (monotonic_time, text)
 _TRANSCRIPTS_LOCK = threading.Lock()
 _TRANSCRIPT_TTL = 600.0                      # a minute of thought, then a long pause
-TRANSCRIPT_MARKER = "(transcribed from the Even glasses; may contain speech-to-text errors) "
+# Short on purpose. It sits in front of every spoken message, and "transcribed"
+# already tells a competent reader that an odd word may be a mishearing rather
+# than an instruction. Longer wording was tried and read as clutter.
+TRANSCRIPT_MARKER = "(transcribed) "
 
 
 def _remember_transcript(text):
