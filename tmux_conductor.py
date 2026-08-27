@@ -82,6 +82,19 @@ def _audit(action, pane_id, detail):
 
 # --- core operations --------------------------------------------------------
 
+# Claude Code renames its process to its own version string, so `pane_current_command`
+# reads "2.1.238", not "claude". Matching the literal name recognises no pane at all on a
+# machine where Claude Code is actually running — the fleet list then filters everything
+# out and the glasses show an empty floor. ai-composer's own detector learned this and
+# matches a bare version; this mirrors it. CONDUCTOR_CLAUDE_COMMANDS can extend the set.
+_CLAUDE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_CLAUDE_EXTRA = {c.strip() for c in os.environ.get("CONDUCTOR_CLAUDE_COMMANDS", "").split(",") if c.strip()}
+
+
+def _is_claude_command(cmd):
+    return cmd == "claude" or bool(_CLAUDE_VERSION_RE.match(cmd or "")) or cmd in _CLAUDE_EXTRA
+
+
 def list_panes(claude_only: bool = False):
     """All panes across the tmux server, as dicts. pane_id (e.g. '%29') is the
     stable target for every other operation. Returns [] when no tmux server is
@@ -103,7 +116,7 @@ def list_panes(claude_only: bool = False):
             "command": f[7], "pid": int(f[8]) if f[8].isdigit() else None,
             "path": f[9], "title": f[10],
             "is_conductor": f[0] == SELF_PANE,
-            "is_claude": f[7] == "claude",
+            "is_claude": _is_claude_command(f[7]),
         }
         if claude_only and not p["is_claude"]:
             continue
@@ -487,7 +500,9 @@ _GLYPH = {"working": "▶", "idle": "✳", "other": "·"}
 
 def session_status(p):
     """'working' | 'idle' | 'other'(non-claude), inferred from the title glyph."""
-    if p["command"] != "claude":
+    # Same trap as is_claude: comparing against the literal "claude" marks every real
+    # Claude Code pane 'other', so the fleet list sorts them last and shows no activity.
+    if not _is_claude_command(p["command"]):
         return "other"
     t = (p["title"] or "").strip()
     if t and _BR_LO <= ord(t[0]) <= _BR_HI:

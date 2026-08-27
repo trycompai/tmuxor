@@ -65,7 +65,21 @@ created panes nobody was watching — which is exactly the failure mode this who
 evening has been about. The installer now prefers `ai-composer` when it exists,
 falls back to `"0"`, and honours `TMUXOR_TMUX_SESSION`.
 
-**9. Dry-run no longer has side effects.** It was writing a real plist into
+**9. It could not see a single Claude pane.** `is_claude` compared
+`pane_current_command` against the literal string `"claude"`. **Claude Code
+renames its process to its own version string** — the panes here report
+`2.1.238` and `2.1.246`, not `claude`. So `is_claude` was false for every agent
+on the floor, the fleet list filters on it, and the glasses showed an empty
+machine. `session_status` had the identical comparison, so even once visible
+they all read `other`.
+
+Both now go through `_is_claude_command()`, which accepts `claude` or a bare
+`N.N.N` version, extendable via `CONDUCTOR_CLAUDE_COMMANDS`. ai-composer's own
+detector already carried this knowledge (`^(node|codex|\d+\.\d+\.\d+)$`);
+upstream had not met it yet. After the fix: three Claude panes visible, with
+real `idle`/`waiting` status instead of `other`.
+
+**10. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 
