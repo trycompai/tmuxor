@@ -126,6 +126,11 @@ class TmuxSource:
         return tc.resolve_session(p)
 
     def transcript_candidates(self, p):
+        # Prefer ai-composer's verified binding; fall back to the cwd heuristic,
+        # which cannot tell two agents apart when they share a directory.
+        exact = tc.composer_transcript(p.get("pane_id"))
+        if exact is not None:
+            return [exact]
         return tc.transcript_candidates(p["path"], p.get("pid"))
 
     def list_windows(self):

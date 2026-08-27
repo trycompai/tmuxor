@@ -98,7 +98,27 @@ An entry's position changed for reasons having nothing to do with its own agent,
 and anyone selecting by position got whoever was in that slot. Both paths now
 sort by `pane_id`, which never changes.
 
-**12. Dry-run no longer has side effects.** It was writing a real plist into
+**12. A pane showed the wrong conversation entirely.** Transcripts were
+resolved from the pane's cwd, and every agent started in `$HOME` shares one
+project directory — `transcript_candidates`' own docstring calls the mapping
+"one-to-many". The tie was broken by newest mtime, so opening a pane showed
+whichever agent had spoken most recently. Daniel opened the orchestrator and
+read the Slack agent's conversation; a message he meant for one agent reached
+another.
+
+ai-composer already knew the answer. It verifies the active process and exact
+transcript when a session is bound, and records `session_id` and
+`transcript_path` against the pane in `~/.ai-composer/state.snapshot.json` —
+`inspect` just never exposed it. `TmuxSource.transcript_candidates` now asks for
+that binding first, cached on the state file's mtime, and falls back to the cwd
+heuristic on any error. **This is the deliberate break from upstream**, which has
+no ai-composer to ask.
+
+Rejected alternative: giving each session its own cwd. It would have made the
+heuristic accidentally correct rather than replacing a wrong binding, and would
+fail again the first time two agents shared a directory.
+
+**13. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 

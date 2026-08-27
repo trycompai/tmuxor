@@ -214,6 +214,60 @@ def _safe_mtime(p) -> float:
         return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Authoritative pane -> transcript binding, via ai-composer.
+#
+# Resolving a transcript from the pane's cwd is one-to-many: every agent started
+# in $HOME shares one project directory, and the old code broke the tie by
+# newest mtime -- so opening a pane showed whichever agent had spoken most
+# recently, not the one you selected. Daniel opened the orchestrator and read
+# the Slack agent's conversation.
+#
+# ai-composer already knows the true binding: it verifies the active process and
+# exact transcript when a session is bound, and records session_id and
+# transcript_path against the pane. Read that rather than guessing. This is a
+# deliberate divergence from upstream, which has no ai-composer to ask.
+#
+# Cached on the state file's mtime+size, and fail-soft in every direction: any
+# error, missing file or missing record returns None and the caller falls back
+# to the cwd heuristic.
+_COMPOSER_STATE = Path.home() / ".ai-composer" / "state.snapshot.json"
+_BIND_CACHE = {"key": None, "map": {}}
+
+
+def _composer_bindings():
+    try:
+        st = _COMPOSER_STATE.stat()
+    except OSError:
+        return {}
+    key = (st.st_mtime, st.st_size)
+    if _BIND_CACHE["key"] == key:
+        return _BIND_CACHE["map"]
+    out = {}
+    try:
+        with _COMPOSER_STATE.open(encoding="utf8", errors="replace") as fh:
+            data = json.load(fh)
+        for sess in (data.get("state") or {}).get("sessions") or []:
+            pane = ((sess.get("binding") or {}).get("pane_id"))
+            rec = sess.get("provider_recovery") or {}
+            path = rec.get("transcript_path")
+            if pane and path:
+                out[pane] = path
+    except Exception:
+        return _BIND_CACHE["map"]      # keep the last good answer
+    _BIND_CACHE["key"], _BIND_CACHE["map"] = key, out
+    return out
+
+
+def composer_transcript(pane_id):
+    """The transcript ai-composer bound to this pane, or None."""
+    path = _composer_bindings().get(pane_id)
+    if not path:
+        return None
+    p = Path(path)
+    return p if p.exists() else None
+
+
 def transcript_candidates(cwd: str, pid=None):
     """All session JSONL files whose project dir matches `cwd`, newest first.
     cwd->transcript is one-to-many when several sessions share a directory."""
