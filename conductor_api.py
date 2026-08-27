@@ -159,10 +159,12 @@ WHISPER_USD_PER_MIN = 0.006  # OpenAI whisper-1 pricing
 _RECENT_TRANSCRIPTS = deque(maxlen=24)      # (monotonic_time, text)
 _TRANSCRIPTS_LOCK = threading.Lock()
 _TRANSCRIPT_TTL = 600.0                      # a minute of thought, then a long pause
-# Short on purpose. It sits in front of every spoken message, and "transcribed"
-# already tells a competent reader that an odd word may be a mishearing rather
-# than an instruction. Longer wording was tried and read as clutter.
-TRANSCRIPT_MARKER = "(transcribed) "
+# As short as it can be while still meaning something. This is rendered on the
+# G2 heads-up display as well as read by the agent, so every character costs
+# Daniel screen space. "voice" carries the whole point -- a reader seeing an odd
+# word knows to suspect a mishearing rather than an instruction. Two longer
+# wordings were tried first and both read as clutter.
+TRANSCRIPT_MARKER = "(voice) "
 
 
 def _remember_transcript(text):
