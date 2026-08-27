@@ -58,7 +58,14 @@ started, authenticated correctly, and then failed every pane call with
 one. This is invisible in a dry run and invisible from a shell, because both
 have a normal PATH; only the installed service sees it.
 
-**8. Dry-run no longer has side effects.** It was writing a real plist into
+**8. It bound the wrong tmux session.** `CONDUCTOR_TMUX_SESSION` defaults to
+`"0"` upstream. This machine has three tmux sessions and the agent floor lives
+in one named `ai-composer`, so tmuxor attached to an unrelated session and
+created panes nobody was watching — which is exactly the failure mode this whole
+evening has been about. The installer now prefers `ai-composer` when it exists,
+falls back to `"0"`, and honours `TMUXOR_TMUX_SESSION`.
+
+**9. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 
@@ -87,8 +94,12 @@ actually being used.
 
 ## Not done
 - Upstream discovers tmux panes directly rather than through `ai-composer`'s
-  session model. That boundary is where this evening's failure happened, and it
-  is the change worth making next.
+  session model. Binding the right tmux *session* (change 8) fixes where panes
+  land, but a pane created this way is still **invisible to the control plane**:
+  no session record, no Slack thread, no close proposal. `CONDUCTOR_LAUNCH_CMD`
+  defaults to `claude`; pointing it at `ai-composer control new` instead is the
+  change that would make created sessions first-class. That is the next real
+  piece of work.
 - The glasses app is the published Even Hub build; the `glasses/` source here is
   unbuilt and untouched.
 - Port **8790**, so it does not collide with even-terminal's 3456.

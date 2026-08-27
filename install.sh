@@ -30,6 +30,18 @@ case "$(uname -s)" in
   Linux)  SERVICE_KIND="systemd" ;;
   *)      SERVICE_KIND="none" ;;
 esac
+# Upstream defaults to tmux session "0". On this machine the agent floor lives in a
+# session named ai-composer, so binding to "0" silently attaches to an unrelated
+# session and creates panes nobody is watching. Prefer the floor when it exists.
+if [ -z "${TMUXOR_TMUX_SESSION:-}" ]; then
+  if tmux has-session -t ai-composer 2>/dev/null; then
+    TMUX_SESSION_NAME="ai-composer"
+  else
+    TMUX_SESSION_NAME="0"
+  fi
+else
+  TMUX_SESSION_NAME="$TMUXOR_TMUX_SESSION"
+fi
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
 LABEL="ai.comp.tmuxor"
 DRY="${TMUXOR_DRYRUN:-0}"
@@ -104,11 +116,12 @@ umask 177
   echo "CONDUCTOR_TOKEN=$TOKEN"
   echo "CONDUCTOR_BIND=127.0.0.1"
   echo "CONDUCTOR_API_PORT=$PORT"
+  echo "CONDUCTOR_TMUX_SESSION=$TMUX_SESSION_NAME"
   [ -n "$OPENAI_KEY" ] && echo "OPENAI_API_KEY=$OPENAI_KEY"
 } > "$ENV_FILE"
 umask 022
 chmod 600 "$ENV_FILE"
-ok "wrote $ENV_FILE"
+ok "wrote $ENV_FILE (tmux session: $TMUX_SESSION_NAME)"
 
 # 6) service --------------------------------------------------------------
 # launchd has no EnvironmentFile equivalent, so both platforms go through one
