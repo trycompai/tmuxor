@@ -117,6 +117,11 @@ ok "wrote $ENV_FILE"
 cat > "$INSTALL_DIR/run-backend.sh" <<'LAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
+# launchd hands an agent a minimal PATH that excludes Homebrew and ~/.local/bin, so the
+# backend cannot find tmux or claude and every pane call fails with ENOENT. Rebuild a
+# usable PATH here rather than in the plist, so systemd gets the same treatment.
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.nvm/versions/node/v26.7.0/bin:$PATH"
+export PATH
 ENV_FILE="${TMUXOR_ENV:-$HOME/.config/tmux-conductor.env}"
 [ -r "$ENV_FILE" ] || { echo "missing $ENV_FILE" >&2; exit 1; }
 set -a; . "$ENV_FILE"; set +a

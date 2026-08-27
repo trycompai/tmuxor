@@ -51,7 +51,14 @@ readable by every agent on the floor, so that publishes the secret to everything
 on the box. The blob and QR now go to `~/.config/tmuxor/` at `0600`, and the
 installer prints **paths**, not secrets.
 
-**7. Dry-run no longer has side effects.** It was writing a real plist into
+**7. launchd gives agents a minimal PATH.** Found by installing it: the backend
+started, authenticated correctly, and then failed every pane call with
+`[Errno 2] No such file or directory: 'tmux'` — `/opt/homebrew/bin` and
+`~/.local/bin` are simply not on an agent's PATH. `run-backend.sh` now rebuilds
+one. This is invisible in a dry run and invisible from a shell, because both
+have a normal PATH; only the installed service sees it.
+
+**8. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 
@@ -65,10 +72,20 @@ next to the install instead.
 - Config blob decodes to the right base URL and token.
 - `~/Library/LaunchAgents` untouched by dry runs.
 
-## Not done
+## Installed, 2026-08-26
 
-- **Not installed and not run.** No launchd agent loaded, no `tailscale serve`
-  configured for 8790, nothing listening.
+It is running. `ai.comp.tmuxor` is loaded under launchd, the backend listens on
+**`127.0.0.1:8790` only**, `/api/health` and `/api/panes` return 200 with a
+token and 401 without, and it can see all 9 panes.
+
+**One consequence to know:** `tailscale serve` routes a single root path, so
+pointing it at 8790 **replaced** the earlier mapping to even-terminal's 3456.
+The tailnet HTTPS URL now reaches tmuxor. even-terminal is still listening on
+`*:3456` and still reachable directly at
+`http://comp-mac-mini.tail36f46a.ts.net:3456`, which is the path that was
+actually being used.
+
+## Not done
 - Upstream discovers tmux panes directly rather than through `ai-composer`'s
   session model. That boundary is where this evening's failure happened, and it
   is the change worth making next.
