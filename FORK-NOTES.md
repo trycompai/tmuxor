@@ -118,7 +118,19 @@ Rejected alternative: giving each session its own cwd. It would have made the
 heuristic accidentally correct rather than replacing a wrong binding, and would
 fail again the first time two agents shared a directory.
 
-**13. Dry-run no longer has side effects.** It was writing a real plist into
+**13. Voice input now says it is voice input.** Speech-to-text mishears in ways
+that read as confident nonsense — "tmux session" arrived as "team obsession",
+and an agent answered the wrong question at length before anyone noticed. The
+agent could not tell: `/api/transcribe` and `/api/panes/N/send` are separate
+calls and the text is identical either way.
+
+The server now remembers what Whisper returned and, when that exact text is sent
+to a pane, prefixes it with a marker naming it a transcription. Typed input is
+untouched — a marker on everything is noise, and this is only worth saying when
+it is true. Ten-minute window, last 24 transcriptions, so a stale match cannot
+mislabel something typed much later.
+
+**14. Dry-run no longer has side effects.** It was writing a real plist into
 `~/Library/LaunchAgents` even under `TMUXOR_DRYRUN=1`. Dry-run output is parked
 next to the install instead.
 

@@ -27,6 +27,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,6 +142,39 @@ def translate_command(description, cwd):
 
 
 WHISPER_USD_PER_MIN = 0.006  # OpenAI whisper-1 pricing
+
+# Voice input reaches an agent as ordinary text, and speech-to-text mishears in ways
+# that read as confident nonsense: "tmux session" arrived as "team obsession", and an
+# agent spent several paragraphs answering the wrong question. The agent cannot tell,
+# because /api/transcribe and /api/panes/N/send are separate calls and the text looks
+# identical either way.
+#
+# So remember what Whisper returned, and when that same text is sent to a pane, label
+# it. Typed input is left alone -- a marker on everything would be noise, and this is
+# only worth saying when it is actually true.
+_RECENT_TRANSCRIPTS = deque(maxlen=24)      # (monotonic_time, text)
+_TRANSCRIPT_TTL = 600.0                      # a minute of thought, then a long pause
+TRANSCRIPT_MARKER = "(transcribed from the Even glasses; may contain speech-to-text errors) "
+
+
+def _remember_transcript(text):
+    if text and text.strip():
+        _RECENT_TRANSCRIPTS.append((time.monotonic(), text.strip()))
+
+
+def _tap_transcript(text):
+    _remember_transcript(text)
+    return text
+
+
+def _was_transcribed(text):
+    """True if this exact text came back from Whisper recently."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    now = time.monotonic()
+    return any(now - when <= _TRANSCRIPT_TTL and t == said
+               for when, said in _RECENT_TRANSCRIPTS)
 
 
 def wav_seconds(audio):
@@ -426,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 secs = wav_seconds(audio)
                 return self._json(200, {
-                    "text": whisper_transcribe(audio, openai_key(q.get("keypath", [None])[0])),
+                    "text": _tap_transcript(whisper_transcribe(audio, openai_key(q.get("keypath", [None])[0]))),
                     "seconds": round(secs, 1),
                     "cost": round(secs / 60 * WHISPER_USD_PER_MIN, 4),
                 })
@@ -443,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
             text = body.get("text", "")
             if not text:
                 return self._json(400, {"error": "text required"})
+            if _was_transcribed(text):
+                text = TRANSCRIPT_MARKER + text
             try:  # pane may be unsendable (the conductor's own pane) or closed mid-request
                 r = src.send_text(p["pane_id"], text, submit=bool(body.get("submit", True)))
             except Exception as e:
