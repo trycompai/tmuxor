@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 from collections import deque
 import urllib.request
@@ -152,14 +153,19 @@ WHISPER_USD_PER_MIN = 0.006  # OpenAI whisper-1 pricing
 # So remember what Whisper returned, and when that same text is sent to a pane, label
 # it. Typed input is left alone -- a marker on everything would be noise, and this is
 # only worth saying when it is actually true.
+# The server is threaded, so a send can read this while a transcribe appends to it.
+# Iterating a deque mid-append raises RuntimeError and would 500 the very request
+# carrying Daniel's message. Snapshot under a lock instead.
 _RECENT_TRANSCRIPTS = deque(maxlen=24)      # (monotonic_time, text)
+_TRANSCRIPTS_LOCK = threading.Lock()
 _TRANSCRIPT_TTL = 600.0                      # a minute of thought, then a long pause
 TRANSCRIPT_MARKER = "(transcribed from the Even glasses; may contain speech-to-text errors) "
 
 
 def _remember_transcript(text):
     if text and text.strip():
-        _RECENT_TRANSCRIPTS.append((time.monotonic(), text.strip()))
+        with _TRANSCRIPTS_LOCK:
+            _RECENT_TRANSCRIPTS.append((time.monotonic(), text.strip()))
 
 
 def _tap_transcript(text):
@@ -173,8 +179,9 @@ def _was_transcribed(text):
     if not t:
         return False
     now = time.monotonic()
-    return any(now - when <= _TRANSCRIPT_TTL and t == said
-               for when, said in _RECENT_TRANSCRIPTS)
+    with _TRANSCRIPTS_LOCK:
+        recent = list(_RECENT_TRANSCRIPTS)
+    return any(now - when <= _TRANSCRIPT_TTL and t == said for when, said in recent)
 
 
 def wav_seconds(audio):
