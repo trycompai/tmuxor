@@ -204,3 +204,35 @@ rather than a spinner glyph, which is better evidence than the Claude path uses.
 `is_claude` now means "an agent lives here" rather than "Claude Code lives here",
 because that is what the glasses filter the fleet on. The new `harness` field
 carries the finer answer.
+
+
+## ai-composer removed (2026-09-01)
+
+ai-composer was uninstalled on 2026-08-31. This fork depended on it in three
+places, all of which failed *silently* rather than loudly — which is why nobody
+noticed for a day:
+
+- **`composer_transcript`** read the verified pane→transcript binding from
+  `~/.ai-composer/state.snapshot.json`. Superseded rather than dropped: with the
+  process layer fixed on macOS, `resolve_session` walks the pane's own process
+  tree to the agent's pid and reads the runtime record there. That is the exact
+  binding, from the operating system instead of a third party.
+- **`_composer_titles`** shelled out to `ai-composer inspect sessions --json`
+  every 30 seconds. The binary is gone, so every call raised, was caught, and
+  returned an empty map — labelling quietly fell back to the drifting pane title.
+  The orchestrator pane read *"Clone Comp AI repositories"* for days.
+- **`install.sh`** pinned the tmux session to one named `ai-composer`. That name
+  outlived the thing, and pinning a session that no longer exists is precisely
+  what made `/api/windows` return `[]` on 2026-09-01 — a live service, a healthy
+  tunnel, and an empty floor.
+
+Labels now come from the tmux **window name** when someone renamed the window.
+A default window carries the running command, so a name that is not the command
+is a name a person typed — and on an agent floor, that is the agent's name. The
+harness's own session name is second (Claude Code derives `drodriguez-b5` from
+the directory: current, but less recognisable than what the person wrote), and
+the pane title stays the last resort.
+
+The installer no longer names a session at all. It takes the only running
+session when there is exactly one, so the common case needs no configuration and
+cannot name a ghost.

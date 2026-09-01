@@ -197,5 +197,52 @@ class ProcessStart(unittest.TestCase):
         self.assertIsInstance(tc._proc_descendants(parent), list)
 
 
+
+
+class Labels(unittest.TestCase):
+    """session_label after ai-composer was removed."""
+
+    def pane(self, **kw):
+        base = {"pane_id": "%1", "window_name": "", "command": "2.1.251",
+                "title": "", "pid": None, "path": "/w"}
+        base.update(kw)
+        return base
+
+    def test_a_named_window_wins(self):
+        p = self.pane(window_name="harbour", title="Inspect blocked landing work")
+        self.assertEqual(tc.session_label(p), "harbour")
+
+    def test_a_default_window_is_not_a_name(self):
+        # tmux names a window after the running command until someone renames it.
+        p = self.pane(window_name="2.1.251", command="2.1.251", title="✳ real title")
+        self.assertEqual(tc.session_label(p), "real title")
+
+    def test_a_shell_window_is_not_a_name(self):
+        p = self.pane(window_name="zsh", command="zsh", title="something")
+        self.assertEqual(tc.session_label(p), "something")
+
+    def test_the_working_glyph_is_stripped_from_a_title(self):
+        p = self.pane(title="⠁ doing the thing")
+        self.assertEqual(tc.session_label(p), "doing the thing")
+
+    def test_it_falls_back_to_the_command_when_there_is_nothing_else(self):
+        p = self.pane(title="", command="node")
+        self.assertEqual(tc.session_label(p), "node")
+
+    def test_a_missing_session_record_does_not_raise(self):
+        # resolve_session touches the process table; a pane with no pid must not
+        # take the label path down with it.
+        p = self.pane(pid=None, title="fallback")
+        self.assertEqual(tc.session_label(p), "fallback")
+
+
+class NoComposerLeft(unittest.TestCase):
+    def test_the_composer_entry_points_are_gone(self):
+        # They failed silently for a day rather than loudly: `ai-composer
+        # inspect` returned nothing and labelling fell back without a word.
+        for name in ("composer_transcript", "_composer_bindings", "_composer_titles"):
+            self.assertFalse(hasattr(tc, name), f"{name} still present")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -87,8 +87,8 @@ def _audit(action, pane_id, detail):
 # Claude Code renames its process to its own version string, so `pane_current_command`
 # reads "2.1.238", not "claude". Matching the literal name recognises no pane at all on a
 # machine where Claude Code is actually running — the fleet list then filters everything
-# out and the glasses show an empty floor. ai-composer's own detector learned this and
-# matches a bare version; this mirrors it. CONDUCTOR_CLAUDE_COMMANDS can extend the set.
+# out and the glasses show an empty floor. Matching a bare version is what works.
+# CONDUCTOR_CLAUDE_COMMANDS can extend the set; see is_codex_pane for the other harness.
 _PS_CACHE = {"at": 0.0, "map": {}}
 _PS_TTL = 2.0  # a poll interval; the process tree does not move faster than this
 
@@ -230,57 +230,17 @@ def _safe_mtime(p) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Authoritative pane -> transcript binding, via ai-composer.
+# Resolving a transcript from the pane's cwd is one-to-many: several agents
+# started in one directory share a project directory, and breaking the tie by
+# newest mtime shows whichever agent spoke most recently rather than the one you
+# selected. Daniel opened the orchestrator and read another agent's conversation.
 #
-# Resolving a transcript from the pane's cwd is one-to-many: every agent started
-# in $HOME shares one project directory, and the old code broke the tie by
-# newest mtime -- so opening a pane showed whichever agent had spoken most
-# recently, not the one you selected. Daniel opened the orchestrator and read
-# the Slack agent's conversation.
-#
-# ai-composer already knows the true binding: it verifies the active process and
-# exact transcript when a session is bound, and records session_id and
-# transcript_path against the pane. Read that rather than guessing. This is a
-# deliberate divergence from upstream, which has no ai-composer to ask.
-#
-# Cached on the state file's mtime+size, and fail-soft in every direction: any
-# error, missing file or missing record returns None and the caller falls back
-# to the cwd heuristic.
-_COMPOSER_STATE = Path.home() / ".ai-composer" / "state.snapshot.json"
-_BIND_CACHE = {"key": None, "map": {}}
-
-
-def _composer_bindings():
-    try:
-        st = _COMPOSER_STATE.stat()
-    except OSError:
-        return {}
-    key = (st.st_mtime, st.st_size)
-    if _BIND_CACHE["key"] == key:
-        return _BIND_CACHE["map"]
-    out = {}
-    try:
-        with _COMPOSER_STATE.open(encoding="utf8", errors="replace") as fh:
-            data = json.load(fh)
-        for sess in (data.get("state") or {}).get("sessions") or []:
-            pane = ((sess.get("binding") or {}).get("pane_id"))
-            rec = sess.get("provider_recovery") or {}
-            path = rec.get("transcript_path")
-            if pane and path:
-                out[pane] = path
-    except Exception:
-        return _BIND_CACHE["map"]      # keep the last good answer
-    _BIND_CACHE["key"], _BIND_CACHE["map"] = key, out
-    return out
-
-
-def composer_transcript(pane_id):
-    """The transcript ai-composer bound to this pane, or None."""
-    path = _composer_bindings().get(pane_id)
-    if not path:
-        return None
-    p = Path(path)
-    return p if p.exists() else None
+# This fork used to ask ai-composer, which recorded the verified pane->transcript
+# binding. ai-composer was removed on 2026-08-31. The replacement is better and
+# has no dependency: `resolve_session` walks the pane's process tree to the
+# agent's own pid and reads the runtime record it keeps there. That is the exact
+# binding, from the operating system rather than from a third party.
+# ---------------------------------------------------------------------------
 
 
 def transcript_candidates(cwd: str, pid=None):
@@ -877,44 +837,41 @@ def session_status(p):
     return "idle"
 
 
-# A pane title is written by the agent itself and drifts: Claude Code derives it
-# from a session's FIRST message, so the orchestrator pane read "Clone Comp AI
-# repositories" days after it stopped doing that. Daniel opened a pane by its
-# label and got a different agent. Where ai-composer knows a session's real name,
-# prefer it -- that is the name a person chose and keeps current.
-#
-# Read-only, cached, and fail-soft: if ai-composer is missing, slow or errors,
-# this returns {} and labelling falls back to exactly the old behaviour. tmuxor
-# must not depend on ai-composer being healthy.
-_TITLE_CACHE = {"at": 0.0, "map": {}}
-_TITLE_TTL = 30.0
-
-
-def _composer_titles():
-    now = time.monotonic()
-    if now - _TITLE_CACHE["at"] < _TITLE_TTL:
-        return _TITLE_CACHE["map"]
-    titles = {}
-    try:
-        out = subprocess.run(["ai-composer", "inspect", "sessions", "--json"],
-                             capture_output=True, text=True, timeout=5)
-        data = json.loads(out.stdout)
-        items = data if isinstance(data, list) else data.get("sessions", [])
-        for it in items:
-            pane = (it.get("binding") or {}).get("pane_id")
-            if it.get("lifecycle") == "running" and pane and it.get("title"):
-                titles[pane] = it["title"]
-    except Exception:
-        titles = _TITLE_CACHE["map"]      # keep the last good answer rather than blanking
-    _TITLE_CACHE["at"], _TITLE_CACHE["map"] = now, titles
-    return titles
-
-
 def session_label(p):
-    """The name a person would recognise, preferring ai-composer's session title."""
-    named = _composer_titles().get(p["pane_id"])
+    """The name a person would recognise for this pane.
+
+    A pane title is written by the agent and drifts: Claude Code derives it from
+    a session's FIRST message, so the orchestrator pane still read "Clone Comp AI
+    repositories" days after it stopped doing that, and Daniel opened a pane by
+    its label and got a different agent.
+
+    This fork used to ask `ai-composer inspect sessions` for the real name. That
+    binary is gone, so the lookup failed on every call and silently returned to
+    the drifting title. Three better answers exist, in this order:
+
+    1. **The tmux window name**, when someone renamed the window. A default
+       window carries the running command, so a name that is not the command is
+       a name a person typed — on an agent floor it is the agent's name, and it
+       is what they already read on screen.
+    2. **The session's own name.** The harness keeps this current, but derives
+       it: Claude Code produced `drodriguez-b5` for the orchestrator, from the
+       directory rather than the work. Correct, and less recognisable than what
+       the person wrote on the window.
+    3. **The pane title**, glyph stripped — upstream's behaviour, still the
+       fallback when nobody has named anything.
+    """
+    window = (p.get("window_name") or "").strip()
+    # A window still carrying its command name says nothing a title would not.
+    if window and window not in ("", "zsh", "bash", "sh", "fish", p.get("command", "")):
+        return window
+
+    try:
+        named = ((resolve_session(p) or {}).get("name") or "").strip()
+    except Exception:
+        named = ""
     if named:
         return named
+
     t = (p["title"] or "").strip()
     if t and (t[0] == _STAR or _BR_LO <= ord(t[0]) <= _BR_HI):
         t = t[1:].strip()

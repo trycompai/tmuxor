@@ -30,12 +30,15 @@ case "$(uname -s)" in
   Linux)  SERVICE_KIND="systemd" ;;
   *)      SERVICE_KIND="none" ;;
 esac
-# Upstream defaults to tmux session "0". On this machine the agent floor lives in a
-# session named ai-composer, so binding to "0" silently attaches to an unrelated
-# session and creates panes nobody is watching. Prefer the floor when it exists.
+# Upstream defaults to tmux session "0". Binding to a session that does not exist
+# means every window call fails and the glasses show an empty floor -- which is
+# exactly what happened when this pinned a session named `ai-composer` that had
+# since been torn down. Prefer the only running session when there is exactly
+# one, so the common case needs no configuration and cannot name a ghost.
 if [ -z "${TMUXOR_TMUX_SESSION:-}" ]; then
-  if tmux has-session -t ai-composer 2>/dev/null; then
-    TMUX_SESSION_NAME="ai-composer"
+  only=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+  if [ "$(printf '%s\n' "$only" | grep -c .)" = "1" ]; then
+    TMUX_SESSION_NAME="$only"
   else
     TMUX_SESSION_NAME="0"
   fi
