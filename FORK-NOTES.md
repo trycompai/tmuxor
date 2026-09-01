@@ -170,3 +170,37 @@ actually being used.
 - The glasses app is the published Even Hub build; the `glasses/` source here is
   unbuilt and untouched.
 - Port **8790**, so it does not collide with even-terminal's 3456.
+
+
+## Codex support (2026-09-01)
+
+Two Codex agents — `@doctor` and `@harbour` — were invisible on the glasses for
+a day. The fleet showed six panes where eight were running, and nobody noticed
+because the six that appeared were the ones being watched.
+
+Three separate causes, each of which would have been enough on its own:
+
+1. **`/proc` does not exist on macOS.** `_proc_descendants` returned `[]` for
+   every pane, so no pane's child process was ever inspected. This also meant no
+   Claude pane ever resolved its exact session — the transcript came from the
+   "newest file in this cwd" fallback, which is right until two sessions share a
+   directory. Now built from one `ps -Ao pid=,ppid=` call, cached per poll.
+2. **`procStart` is recorded in UTC and `ps` prints local time.** The same
+   instant, compared as text, never matched. Compared as instants now.
+3. **Codex renames nothing**, so its pane reads as `node`. The
+   `CONDUCTOR_CLAUDE_COMMANDS=node` escape hatch makes it visible but marks every
+   `npm run dev` pane as an agent too, and still leaves the transcript layer with
+   nothing to read. Detection is now by process argv.
+
+Codex keeps no per-pid runtime record the way Claude Code does, so there is no
+exact pane→session map. What a rollout carries is the directory it started in,
+and this floor gives every agent its own worktree — so cwd identifies the agent.
+**That limit is real:** two Codex sessions in one directory, and the newest wins
+while the older is invisible.
+
+Status comes from the rollout's own `task_started` / `task_complete` events
+rather than a spinner glyph, which is better evidence than the Claude path uses.
+
+`is_claude` now means "an agent lives here" rather than "Claude Code lives here",
+because that is what the glasses filter the fleet on. The new `harness` field
+carries the finer answer.

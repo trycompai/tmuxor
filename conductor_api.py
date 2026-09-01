@@ -81,6 +81,10 @@ def pane_view(src, p):
         "status": _pane_status(src, p),
         "cwd": p["path"],
         "is_claude": p["is_claude"],
+        # Which agent harness the pane runs: "claude", "codex", or None for a
+        # plain shell. `is_claude` answers "is this the floor?" and has to stay
+        # true for both, since that is what the fleet filters on; this says which.
+        "harness": p.get("harness"),
         "is_conductor": p["is_conductor"],
     }
 

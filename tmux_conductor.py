@@ -22,7 +22,9 @@ import os
 import re
 import subprocess
 import sys
+import calendar
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -87,6 +89,9 @@ def _audit(action, pane_id, detail):
 # machine where Claude Code is actually running — the fleet list then filters everything
 # out and the glasses show an empty floor. ai-composer's own detector learned this and
 # matches a bare version; this mirrors it. CONDUCTOR_CLAUDE_COMMANDS can extend the set.
+_PS_CACHE = {"at": 0.0, "map": {}}
+_PS_TTL = 2.0  # a poll interval; the process tree does not move faster than this
+
 _CLAUDE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _CLAUDE_EXTRA = {c.strip() for c in os.environ.get("CONDUCTOR_CLAUDE_COMMANDS", "").split(",") if c.strip()}
 
@@ -118,6 +123,16 @@ def list_panes(claude_only: bool = False):
             "is_conductor": f[0] == SELF_PANE,
             "is_claude": _is_claude_command(f[7]),
         }
+        # `is_claude` is what the glasses filter the fleet on, so it has to mean
+        # "an agent lives here" rather than "Claude Code lives here" -- otherwise
+        # a Codex agent is simply absent from the floor, which is how @doctor and
+        # @harbour were invisible for a day. `harness` carries the finer answer
+        # for anything that needs it.
+        p["harness"] = "claude" if p["is_claude"] else None
+        if not p["is_claude"] and p["pid"] and not p["is_conductor"] \
+                and is_codex_pane(p["pid"]):
+            p["is_claude"] = True
+            p["harness"] = "codex"
         if claude_only and not p["is_claude"]:
             continue
         panes.append(p)
@@ -406,7 +421,12 @@ def read_conversation(jsonl_path):
     User prompts (typed only) interleaved with assistant prose; the in-between
     (thinking / tool calls / results / system noise) stripped; markdown flattened.
     Memoized by (mtime_ns, size) so a steady 2.5s poll on an unchanged transcript
-    costs one stat() instead of a full read + json.loads + ~15 regex passes/turn."""
+    costs one stat() instead of a full read + json.loads + ~15 regex passes/turn.
+
+    A Codex rollout is a different format in the same shape of file, so it is
+    dispatched here rather than at every call site."""
+    if "rollout-" in Path(jsonl_path).name:
+        return read_codex_conversation(jsonl_path)
     try:
         st = Path(jsonl_path).stat()
         key = (st.st_mtime_ns, st.st_size)
@@ -448,22 +468,92 @@ SESSION_DIRS = [
 ]
 
 
+def _ps_children():
+    """{ppid: [pid, ...]} from one `ps` call, for systems without /proc.
+
+    macOS has no /proc at all, so the walk below found no descendants there and
+    every pane looked like a bare shell: no Claude session record was ever
+    reached through it, and a Codex pane could not be recognised at all. One
+    `ps -A` is ~1ms and is cached for a poll interval.
+    """
+    now = time.time()
+    if _PS_CACHE["at"] > now - _PS_TTL:
+        return _PS_CACHE["map"]
+    tree = defaultdict(list)
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,ppid="],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                tree[parts[1]].append(parts[0])
+    except Exception:
+        pass
+    _PS_CACHE.update(at=now, map=tree)
+    return tree
+
+
 def _proc_descendants(pid):
     seen, stack = [], [str(pid)]
+    have_proc = Path("/proc").is_dir()
+    tree = None if have_proc else _ps_children()
     while stack:
         cur = stack.pop()
-        try:
-            for t in (Path("/proc") / cur / "task").iterdir():
-                for ch in (t / "children").read_text().split():
-                    if ch not in seen:
-                        seen.append(ch)
-                        stack.append(ch)
-        except OSError:
-            pass
+        children = []
+        if have_proc:
+            try:
+                for t in (Path("/proc") / cur / "task").iterdir():
+                    children.extend((t / "children").read_text().split())
+            except OSError:
+                pass
+        else:
+            children = tree.get(cur, [])
+        for ch in children:
+            if ch not in seen:
+                seen.append(ch)
+                stack.append(ch)
     return seen
 
 
+def _start_epoch(text, utc):
+    """Parse a `ps`/Claude start stamp to epoch seconds, or None."""
+    try:
+        parsed = time.strptime(" ".join(str(text).split()), "%a %b %d %H:%M:%S %Y")
+    except (ValueError, TypeError):
+        return None
+    return calendar.timegm(parsed) if utc else time.mktime(parsed)
+
+
+def _same_start(pid, recorded):
+    """Is `pid` still the process that wrote `recorded`? Guards pid reuse.
+
+    A plain string comparison works on Linux, where both sides are tick counts.
+    On macOS the two sides disagree in *format*: Claude Code records
+    'Mon Aug 31 16:10:23 2026' in UTC, while `ps -o lstart=` prints the same
+    instant in local time. Compared as text they never match, so every Claude
+    pane failed to resolve and fell back to "newest transcript in this folder" --
+    right answer, wrong reason, and wrong outright once two sessions share a
+    directory. Compare instants.
+    """
+    token = _proc_start_ticks(pid)
+    if token is None or recorded is None:
+        return False
+    if str(token) == str(recorded):
+        return True
+    mine, theirs = _start_epoch(token, utc=False), _start_epoch(recorded, utc=True)
+    return mine is not None and theirs is not None and abs(mine - theirs) < 2
+
+
 def _proc_start_ticks(pid):
+    """A token that changes when a pid is recycled. Ticks on Linux, start time
+    elsewhere -- the value is never interpreted, only compared."""
+    if not Path("/proc").is_dir():
+        try:
+            out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                                 capture_output=True, text=True)
+            return out.stdout.strip() or None
+        except Exception:
+            return None
     try:
         after = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
         return after[19]  # field 22: starttime in clock ticks (guards pid reuse)
@@ -523,12 +613,31 @@ def resolve_session(pane):
     a sessions/<pid>.json record. procStart guards against pid recycling. Returns
     that record plus the resolved transcript path (jsonl), or None.
     Caches the stable pane->claude resolution so a steady poll skips the /proc
-    descendant walk; the per-call sessions/<pid>.json re-read keeps status/jsonl fresh."""
+    descendant walk; the per-call sessions/<pid>.json re-read keeps status/jsonl fresh.
+
+    A Codex pane is answered first and separately. Codex keeps no per-pid runtime
+    record, so there is nothing to look up by pid; what it does keep is a rollout
+    stamped with the directory it started in. Returning it here rather than at the
+    call site means both sources and every endpoint get Codex transcripts without
+    knowing Codex exists."""
     pane_pid = pane["pid"]
+    if pane.get("harness") == "codex" or (pane_pid and is_codex_pane(pane_pid)):
+        rollout = codex_rollout_for(pane.get("path") or "")
+        if not rollout:
+            return None
+        meta = _codex_meta(rollout) or {}
+        return {
+            "sessionId": meta.get("session_id") or rollout.stem,
+            "cwd": meta.get("cwd", pane.get("path", "")),
+            # 'busy' is the word the API tests for; keep the vocabulary.
+            "status": "busy" if codex_status(rollout) == "working" else "idle",
+            "harness": "codex",
+            "jsonl": str(rollout),
+        }
     c = _resolve_cache.get(pane_pid)
     if c:
         claude_pid, procStart, sd_str, sessionId, cwd = c
-        if str(_proc_start_ticks(claude_pid)) == str(procStart):  # same live process
+        if _same_start(claude_pid, procStart):  # same live process
             rec = _session_record(Path(sd_str), claude_pid, sessionId, cwd)
             if rec is not None:
                 return rec
@@ -542,7 +651,7 @@ def resolve_session(pane):
                 info = json.loads(f.read_text())
             except Exception:
                 continue
-            if str(info.get("procStart")) != str(_proc_start_ticks(pid)):
+            if not _same_start(pid, info.get("procStart")):
                 continue  # stale record from a recycled pid
             cwd = info.get("cwd", "")
             if len(_resolve_cache) > 256:  # bound: pane pids churn over the service's lifetime
@@ -553,6 +662,193 @@ def resolve_session(pane):
     return None
 
 
+
+# --- Codex panes -----------------------------------------------------------
+# A Claude Code pane renames its process to its version string; a Codex pane does
+# not rename itself at all and reads as plain `node`. Matching `node` is what the
+# CONDUCTOR_CLAUDE_COMMANDS escape hatch is for, and it works — but it also marks
+# every `npm run dev` pane as an agent, and it tells us nothing about which
+# harness is running, so the transcript layer still finds nothing to read.
+#
+# The honest test is the process tree: a Codex pane has a descendant whose argv
+# names the codex binary. That costs one `ps` per unrecognised pane, cached.
+CODEX_SESSIONS = Path(os.environ.get("CONDUCTOR_CODEX_SESSIONS",
+                                     str(Path.home() / ".codex" / "sessions")))
+_CODEX_ARGV_RE = re.compile(r"(?:^|/)codex(?:\s|$)|@openai/codex")
+_codex_pane_cache = {}   # pane_pid -> (procStart, bool)
+_codex_rollout_cache = {}  # cwd -> (path, mtime_ns)
+
+
+def _argv(pid):
+    try:
+        return subprocess.run(["ps", "-o", "args=", "-p", str(pid)],
+                              capture_output=True, text=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def is_codex_pane(pane_pid):
+    """True when this pane is running Codex, by looking at what it actually runs.
+
+    Cached against the pane's process start, so a pid recycled into something
+    else is not remembered as an agent.
+    """
+    start = str(_proc_start_ticks(pane_pid))
+    hit = _codex_pane_cache.get(pane_pid)
+    if hit and hit[0] == start:
+        return hit[1]
+    found = any(_CODEX_ARGV_RE.search(_argv(pid))
+                for pid in _proc_descendants(pane_pid))
+    if len(_codex_pane_cache) > 256:
+        _codex_pane_cache.pop(next(iter(_codex_pane_cache)))
+    _codex_pane_cache[pane_pid] = (start, found)
+    return found
+
+
+def _codex_meta(path):
+    """A rollout's opening `session_meta`, or None. One line, not the whole file."""
+    try:
+        with open(path, errors="replace") as fh:
+            first = fh.readline()
+        rec = json.loads(first)
+    except Exception:
+        return None
+    return rec.get("payload") if rec.get("type") == "session_meta" else None
+
+
+def codex_rollout_for(cwd, days=7):
+    """The newest Codex rollout recorded for `cwd`, or None.
+
+    Codex has no per-pid runtime record the way Claude Code does, so there is no
+    exact pane->session map to use. What a rollout *does* carry is the directory
+    it was started in, and this floor gives every agent its own worktree — so cwd
+    identifies the agent even though it would not identify a session on a machine
+    where several run in one directory. That limit is real: with two Codex
+    sessions in one directory, the newest wins and the older is invisible.
+
+    Only the last `days` of rollout directories are scanned, newest first, and
+    the answer is cached per cwd until the file changes.
+    """
+    hit = _codex_rollout_cache.get(cwd)
+    if hit:
+        path, mtime = hit
+        try:
+            if path.exists() and path.stat().st_mtime_ns >= mtime:
+                _codex_rollout_cache[cwd] = (path, path.stat().st_mtime_ns)
+                return path
+        except OSError:
+            pass
+        _codex_rollout_cache.pop(cwd, None)
+
+    if not CODEX_SESSIONS.is_dir():
+        return None
+    cutoff = time.time() - days * 86400
+    files = [f for f in CODEX_SESSIONS.rglob("rollout-*.jsonl")
+             if _safe_mtime(f) >= cutoff]
+    for path in sorted(files, key=_safe_mtime, reverse=True):
+        meta = _codex_meta(path)
+        if meta and meta.get("cwd") == cwd:
+            try:
+                _codex_rollout_cache[cwd] = (path, path.stat().st_mtime_ns)
+            except OSError:
+                pass
+            return path
+    return None
+
+
+# The first user message in a Codex rollout is the harness injecting AGENTS.md,
+# not something a person typed. It is thousands of characters of instructions and
+# would open the glasses on a wall of text.
+_CODEX_INJECTED = re.compile(r"^#\s*AGENTS\.md instructions for\b|^<INSTRUCTIONS>")
+
+
+def _codex_text(content):
+    """Flatten a Codex content list.
+
+    Deliberately not `_flatten_content`: that one speaks Anthropic's block shape
+    (`type: "text"`), and Codex writes `input_text` / `output_text`. Passing one
+    to the other returns an empty string for every turn -- a transcript that
+    reads as a session with nothing in it rather than as an error.
+    """
+    if isinstance(content, str):
+        return content.strip()
+    parts = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in ("text", "input_text", "output_text"):
+            parts.append(block.get("text", ""))
+    return "\n".join(x for x in parts if x).strip()
+
+
+def read_codex_conversation(path):
+    """A Codex rollout as [{role, text}], oldest first — same shape as Claude's.
+
+    Memoized on (mtime, size) exactly like read_conversation, because the poll
+    re-reads this every couple of seconds.
+    """
+    try:
+        st = Path(path).stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None:
+        hit = _convo_cache.get(path)
+        if hit and hit[0] == key:
+            return hit[1]
+
+    turns = []
+    for line in Path(path).read_text(errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("type") != "response_item":
+            continue
+        payload = rec.get("payload") or {}
+        if payload.get("type") != "message":
+            continue
+        role = payload.get("role")
+        if role not in ("user", "assistant"):
+            continue  # 'developer' is harness scaffolding, never a turn
+        text = _codex_text(payload.get("content") or [])
+        if not text or (role == "user" and _CODEX_INJECTED.match(text)):
+            continue
+        turns.append({"role": role, "text": _strip_markdown(text)})
+
+    if key is not None:
+        _convo_cache[path] = (key, turns)
+        if len(_convo_cache) > 64:
+            _convo_cache.pop(next(iter(_convo_cache)))
+    return turns
+
+
+def codex_status(path):
+    """'working' or 'idle', from the rollout's own turn events.
+
+    Claude's status is read off the spinner glyph in the pane title. Codex draws
+    a different spinner, so that inference silently reports every Codex pane as
+    idle. The rollout is better evidence anyway: `task_started` without a later
+    `task_complete` means a turn is in flight.
+    """
+    state = "idle"
+    try:
+        for line in Path(path).read_text(errors="replace").splitlines():
+            if '"task_started"' not in line and '"task_complete"' not in line:
+                continue  # cheap reject before parsing
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            kind = (rec.get("payload") or {}).get("type")
+            if kind == "task_started":
+                state = "working"
+            elif kind == "task_complete":
+                state = "idle"
+    except OSError:
+        return "idle"
+    return state
+
 # --- fleet views (compact renderings for the glasses) -----------------------
 
 _STAR = "✳"                  # ✳ = idle / awaiting input
@@ -561,9 +857,18 @@ _GLYPH = {"working": "▶", "idle": "✳", "other": "·"}
 
 
 def session_status(p):
-    """'working' | 'idle' | 'other'(non-claude), inferred from the title glyph."""
+    """'working' | 'idle' | 'other'(not an agent).
+
+    Claude Code's spinner is a braille glyph in the pane title, so its state is
+    read from there. Codex draws its own spinner, which that test does not
+    recognise -- it would report every Codex pane idle forever. Its rollout says
+    plainly whether a turn is in flight, so ask that instead.
+    """
     # Same trap as is_claude: comparing against the literal "claude" marks every real
     # Claude Code pane 'other', so the fleet list sorts them last and shows no activity.
+    if p.get("harness") == "codex":
+        path = codex_rollout_for(p.get("path") or "")
+        return codex_status(path) if path else "idle"
     if not _is_claude_command(p["command"]):
         return "other"
     t = (p["title"] or "").strip()
