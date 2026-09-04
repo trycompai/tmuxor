@@ -136,14 +136,28 @@ def list_panes(claude_only: bool = False):
         if claude_only and not p["is_claude"]:
             continue
         panes.append(p)
-    # Return in a STABLE order. tmux lists by window index, and it reuses those
-    # indices when a window closes -- so closing one session silently moved an
-    # unrelated one up the list, and anyone selecting by position got a
-    # different agent than the one they meant. pane_id never changes.
-    def _num(p):
-        raw = str(p.get("pane_id", "")).lstrip("%")
-        return int(raw) if raw.isdigit() else 1 << 30
-    panes.sort(key=_num)
+    # Order the fleet the way the operator arranged it.
+    #
+    # This sorted by `pane_id` until 2026-09-04, for a real reason: tmux reuses a
+    # window index when a window closes, so closing one session silently moved an
+    # unrelated one up the list and anyone selecting by position got a different
+    # agent than they meant. pane_id never changes, so it could not mislead.
+    #
+    # It also could not *inform*. Daniel curates window order to say something --
+    # `surveyor | billing | harbour` sit together because that is the order the
+    # work moves through them -- and a fleet sorted by creation time throws that
+    # away. On the glasses, where the list is the whole interface, position is
+    # most of the meaning.
+    #
+    # The original hazard is handled where it actually lives: every operation in
+    # this API targets a **pane id**, never an index, so a list that reorders can
+    # no longer send a message to the wrong agent. What moves is what a person
+    # reads, not what anything acts on. `pane_id` remains the last tiebreak so
+    # two panes in one window keep a fixed order.
+    def _order(p):
+        return (p.get("window_index", 1 << 30), p.get("pane_index", 0),
+                int(str(p.get("pane_id", "")).lstrip("%") or 1 << 30))
+    panes.sort(key=_order)
     return panes
 
 

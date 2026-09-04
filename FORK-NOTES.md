@@ -236,3 +236,23 @@ the pane title stays the last resort.
 The installer no longer names a session at all. It takes the only running
 session when there is exactly one, so the common case needs no configuration and
 cannot name a ghost.
+
+
+## The fleet follows window order (2026-09-04)
+
+`list_panes` sorted by `pane_id` until now, for a real reason: tmux reuses a
+window index when a window closes, so closing one session silently moved an
+unrelated one up the list and anyone selecting by position got a different agent
+than they meant.
+
+That fix removed a hazard and removed the signal with it. Daniel curates window
+order deliberately — `surveyor | billing | harbour` sit together because that is
+the order work moves through them — and a fleet sorted by creation time throws
+that arrangement away. On the glasses, where the list *is* the interface,
+position carries most of the meaning.
+
+The original hazard is handled where it actually lives: **every operation in this
+API targets a pane id, never an index.** A reordering list can no longer send a
+message to the wrong agent, because nothing acts on position. What moves is what
+a person reads. `pane_id` stays the last tiebreak so two panes in one window keep
+a fixed order.
