@@ -146,7 +146,47 @@ def translate_command(description, cwd):
     return text.strip().strip("`").strip()
 
 
-WHISPER_USD_PER_MIN = 0.006  # OpenAI whisper-1 pricing
+# Which model turns speech into text, and what a minute of it costs.
+#
+# `whisper-1` was hardcoded until 2026-09-09. It is the cheapest thing to get
+# wrong and the most expensive to trust: it fills silence with fluent invention.
+# Sent one second of a 440 Hz sine tone it answered **"Oh"**; over a week it
+# produced a Korean news sign-off and a YouTube outro from pauses in Daniel's
+# recordings, and turned "billing" into "building" in a message to executives.
+#
+# `gpt-transcribe` returned an empty string for the same tone, costs less, and
+# is billed by duration rather than tokens — which matters here because this
+# endpoint reports a per-minute cost, and a token-billed model would make that
+# number a guess. Measured the same day against the live API:
+#
+#     gpt-transcribe          ""     $0.0045/min, billed by duration
+#     gpt-4o-mini-transcribe  ""     billed by TOKENS -- cost unknowable here
+#     whisper-1               "Oh"   $0.006/min
+#
+# Override with CONDUCTOR_TRANSCRIBE_MODEL. A model with no known per-minute
+# price reports `cost: null` rather than a plausible wrong number.
+TRANSCRIBE_MODEL = os.environ.get("CONDUCTOR_TRANSCRIBE_MODEL", "gpt-transcribe")
+
+USD_PER_MIN = {
+    "gpt-transcribe": 0.0045,
+    "whisper-1": 0.006,
+    "gpt-live-transcribe": 0.017,
+    "gpt-realtime-whisper": 0.017,
+}
+
+
+def transcribe_cost(seconds, model=None):
+    """Dollars for `seconds` of audio, or None when the model is token-billed.
+
+    None is the honest answer for a token-priced model: the caller knows the
+    duration and nothing about the token count, and a number invented here
+    would be indistinguishable from a real one.
+    """
+    rate = USD_PER_MIN.get(model or TRANSCRIBE_MODEL)
+    return None if rate is None else round(seconds / 60 * rate, 4)
+
+
+WHISPER_USD_PER_MIN = USD_PER_MIN["whisper-1"]  # kept: referenced elsewhere
 
 # Voice input reaches an agent as ordinary text, and speech-to-text mishears in ways
 # that read as confident nonsense: "tmux session" arrived as "team obsession", and an
@@ -237,7 +277,11 @@ def openai_key(path_override=None):
 
 
 def whisper_transcribe(audio, key):
-    """Transcribe WAV audio bytes via OpenAI Whisper using the provided key."""
+    """Transcribe WAV audio bytes via OpenAI using the provided key.
+
+    Named for Whisper because that is what it was; the model is now
+    `TRANSCRIBE_MODEL` and the endpoint is the same.
+    """
     if not key.startswith("sk-"):
         raise RuntimeError("no OpenAI API key found (set OPENAI_API_KEY, put it in ~/.env, or set a key-file path in Setup)")
     boundary = "----conductor-" + str(int(time.time() * 1000))
@@ -249,7 +293,7 @@ def whisper_transcribe(audio, key):
                 + ('Content-Disposition: form-data; name="%s"' % name).encode() + crlf + crlf
                 + value.encode() + crlf)
 
-    body = field("model", "whisper-1") + field("response_format", "json")
+    body = field("model", TRANSCRIBE_MODEL) + field("response_format", "json")
     body += (b"--" + bb + crlf
              + b'Content-Disposition: form-data; name="file"; filename="audio.wav"' + crlf
              + b"Content-Type: audio/wav" + crlf + crlf + audio + crlf
@@ -478,7 +522,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {
                     "text": _tap_transcript(whisper_transcribe(audio, openai_key(q.get("keypath", [None])[0]))),
                     "seconds": round(secs, 1),
-                    "cost": round(secs / 60 * WHISPER_USD_PER_MIN, 4),
+                    "cost": transcribe_cost(secs),
+                    "model": TRANSCRIBE_MODEL,
                 })
             except Exception as e:
                 return self._json(502, {"error": str(e)})

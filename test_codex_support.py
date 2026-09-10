@@ -244,5 +244,34 @@ class NoComposerLeft(unittest.TestCase):
             self.assertFalse(hasattr(tc, name), f"{name} still present")
 
 
+
+
+class TranscribeCost(unittest.TestCase):
+    """Cost must be honest, including when it cannot be known."""
+
+    def setUp(self):
+        import conductor_api
+        self.api = conductor_api
+
+    def test_the_default_model_has_a_known_rate(self):
+        self.assertIn(self.api.TRANSCRIBE_MODEL, self.api.USD_PER_MIN)
+
+    def test_a_minute_costs_the_listed_rate(self):
+        self.assertEqual(self.api.transcribe_cost(60, "gpt-transcribe"), 0.0045)
+        self.assertEqual(self.api.transcribe_cost(60, "whisper-1"), 0.006)
+
+    def test_the_default_is_cheaper_than_what_it_replaced(self):
+        self.assertLess(self.api.USD_PER_MIN[self.api.TRANSCRIBE_MODEL],
+                        self.api.USD_PER_MIN["whisper-1"])
+
+    def test_a_token_billed_model_reports_no_cost_rather_than_a_guess(self):
+        # gpt-4o-mini-transcribe bills by tokens. The caller knows the duration
+        # and nothing about the token count, so a number here would be fiction.
+        self.assertIsNone(self.api.transcribe_cost(60, "gpt-4o-mini-transcribe"))
+
+    def test_an_unknown_model_reports_no_cost(self):
+        self.assertIsNone(self.api.transcribe_cost(60, "something-new"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

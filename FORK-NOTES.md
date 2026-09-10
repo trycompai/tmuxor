@@ -256,3 +256,27 @@ API targets a pane id, never an index.** A reordering list can no longer send a
 message to the wrong agent, because nothing acts on position. What moves is what
 a person reads. `pane_id` stays the last tiebreak so two panes in one window keep
 a fixed order.
+
+## The transcription model is configurable, and no longer Whisper (2026-09-09)
+
+`whisper-1` was hardcoded. It is the cheapest thing to get wrong and the most
+expensive to trust, because it does not fail silently — it fills silence with
+fluent invention. Over one week it produced a Korean news sign-off and a YouTube
+outro from pauses in Daniel's voice notes, and turned "billing" into "building"
+in a message he was drafting for executives.
+
+Measured against the live API the same day, one second of a 440 Hz sine tone:
+
+| model | returned | billing |
+| --- | --- | --- |
+| `gpt-transcribe` | `""` | duration, $0.0045/min |
+| `gpt-4o-mini-transcribe` | `""` | **tokens** |
+| `whisper-1` | `"Oh"` | duration, $0.006/min |
+
+The default is now `gpt-transcribe`: cheaper, quiet on non-speech, and billed by
+duration — which this endpoint needs, because it reports a per-minute cost and a
+token-priced model would make that number a guess.
+
+`CONDUCTOR_TRANSCRIBE_MODEL` overrides it. A model with no known per-minute price
+reports `cost: null` rather than a plausible wrong number, and the response now
+names the model that produced the text.
